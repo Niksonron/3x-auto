@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+# Client configuration generator for 3x-ui VPN automation
+# Generates ready-to-use Xray/V2Ray JSON configs for direct and warp outbound modes.
+
+set -euo pipefail
+
+# Check if functions already defined to allow idempotent sourcing
+if ! command -v generate_all_client_configs >/dev/null 2>&1; then
+    # Determine script directory to source dependencies
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    
+    # Source logging utilities
+    # shellcheck source=logging.sh
+    source "${SCRIPT_DIR}/logging.sh"
+    
+    # Source configuration loading utilities
+    # shellcheck source=load-config.sh
+    source "${SCRIPT_DIR}/load-config.sh"
+    
+    # Source configuration validation utilities
+    # shellcheck source=validate-config.sh
+    source "${SCRIPT_DIR}/validate-config.sh"
+    
+    # Source client routing generation utilities
+    # shellcheck source=generate-client-routing.sh
+    source "${SCRIPT_DIR}/generate-client-routing.sh"
+    
+    # ------------------------------------------------------------------------
+    # Helper Functions
+    # ------------------------------------------------------------------------
+    
+    # Extract first element from a comma-separated list, trimmed.
+    # Usage: first_from_csv "a,b,c"
+    first_from_csv() {
+        echo "$1" | cut -d',' -f1 | xargs
+    }
+    
+    # Validate that required Reality parameters are present and non-empty
+    validate_reality_params() {
+        validate_required "SERVER_NAMES"
+        validate_required "DEST"
+        validate_required "SHORT_IDS"
+        validate_required "PRIVATE_KEY"
+        validate_required "PUBLIC_KEY"
+        
+        # Ensure at least one server name and short ID
+        local first_server_name
+        first_server_name="$(first_from_csv "${SERVER_NAMES}")"
+        if [[ -z "${first_server_name}" ]]; then
+            die "SERVER_NAMES must contain at least one domain."
+        fi
+        local first_short_id
+        first_short_id="$(first_from_csv "${SHORT_IDS}")"
+        if [[ -z "${first_short_id}" ]]; then
+            die "SHORT_IDS must contain at least one short ID."
+        fi
+    }
+    
+    # Build JSON payload for VLESS outbound (client side)
+    # Usage: build_vless_outbound_payload <tag>
+    # Outputs JSON string
+    build_vless_outbound_payload() {
+        local tag="$1"
+        
+        # Validate required parameters
+        validate_required "RU_RELAY_IP"
+        validate_required "VLESS_PORT"
+        validate_required "UUID"
+        validate_reality_params
+        
+        local first_server_name
+        first_server_name="$(first_from_csv "${SERVER_NAMES}")"
+        local first_short_id
+        first_short_id="$(first_from_csv "${SHORT_IDS}")"
+        
+        cat <<EOF
+{
+  "protocol": "vless",
+  "settings": {
+    "vnext": [
+      {
+        "address": "${RU_RELAY_IP}",
+        "port": ${VLESS_PORT},
+        "users": [
+          {
+            "id": "${UUID}",
+            "flow": "",
+            "encryption": "none"
+          }
+        ]
+      }
+    ]
+  },
+  "streamSettings": {
+    "network": "tcp",
+    "security": "reality",
+    "realitySettings": {
+      "serverName": "${first_server_name}",
+      "fingerprint": "chrome",
+      "publicKey": "${PUBLIC_KEY}",
+      "shortId": "${first_short_id}",
+      "spiderX": "/"
+    }
+  },
+  "tag": "${tag}"
+}
+EOF
+    }
+    
+    # Generate a complete client configuration JSON for a given mode.
+    # Usage: generate_client_config <mode>
+    #   mode: "direct" or "warp"
+    # Outputs JSON string containing outbounds and routing.
+    generate_client_config() {
+        local mode="$1"
+        local tag="proxy-${mode}"
+        
+        log_info "Generating ${mode} outbound configuration..."
+        
+        # Build VLESS outbound payload
+        local outbound_payload
+        outbound_payload="$(build_vless_outbound_payload "${tag}")"
+        
+        # Generate routing rules with appropriate tags
+        # Direct tag is "direct" (freedom outbound), proxy tag matches the VLESS outbound tag
+        local routing_payload
+        routing_payload="$(generate_client_routing "direct" "${tag}")"
+        
+        # Assemble full configuration
+        cat <<EOF
+{
+  "outbounds": [${outbound_payload}],
+  "routing": ${routing_payload}
+}
+EOF
+    }
+    
+    # Write configuration JSON to a file, with atomic replace.
+    # Usage: write_client_config <file_path> <json_string>
+    write_client_config() {
+        local file_path="$1"
+        local json_string="$2"
+        
+        # Ensure output directory exists
+        local out_dir
+        out_dir="$(dirname "${file_path}")"
+        mkdir -p "${out_dir}"
+        
+        # Create temporary file
+        local tmp_file
+        tmp_file="$(mktemp "${out_dir}/tmp.XXXXXXXXXX")"
+        
+        # Add comment header (JSON does not support comments; we add a line before JSON)
+        {
+            echo "# Xray/V2Ray client configuration generated by 3x-ui VPN automation"
+            echo "# Generated at: $(date -Is)"
+            echo "# Server: ${RU_RELAY_IP}:${VLESS_PORT}"
+            echo "# Outbound mode: $(basename "${file_path}" .txt)"
+            echo ""
+        } > "${tmp_file}"
+        
+        # Append JSON
+        echo "${json_string}" >> "${tmp_file}"
+        
+        # Check if existing file is identical
+        if [[ -f "${file_path}" ]]; then
+            if diff -q "${tmp_file}" "${file_path}" >/dev/null 2>&1; then
+                log_info "Configuration unchanged: ${file_path}"
+                rm -f "${tmp_file}"
+                return 0
+            fi
+        fi
+        
+        # Atomic move
+        mv -f "${tmp_file}" "${file_path}"
+        log_success "Configuration written to ${file_path}"
+    }
+    
+    # ------------------------------------------------------------------------
+    # Main Generation Function
+    # ------------------------------------------------------------------------
+    
+    # Generate both direct and warp client configurations.
+    # Usage: generate_all_client_configs
+    generate_all_client_configs() {
+        log_info "Starting client configuration generation..."
+        
+        # Load configuration (ensures variables are exported)
+        load_config
+        
+        # Validate essential parameters
+        validate_required "RU_RELAY_IP"
+        validate_required "VLESS_PORT"
+        validate_required "UUID"
+        validate_reality_params
+        
+        # Define output directory (relative to project root)
+        local project_root
+        project_root="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+        local out_dir="${project_root}/client-configs"
+        
+        log_info "Output directory: ${out_dir}"
+        
+        # Generate direct outbound config
+        local direct_json
+        direct_json="$(generate_client_config "direct")"
+        write_client_config "${out_dir}/direct-outbound.txt" "${direct_json}"
+        
+        # Generate warp outbound config (identical except tag)
+        local warp_json
+        warp_json="$(generate_client_config "warp")"
+        write_client_config "${out_dir}/warp-outbound.txt" "${warp_json}"
+        
+        log_success "Client configuration generation completed successfully"
+        log_info "Files created:"
+        log_info "  - ${out_dir}/direct-outbound.txt"
+        log_info "  - ${out_dir}/warp-outbound.txt"
+    }
+    
+    # Export functions for use in other scripts
+    export -f generate_all_client_configs build_vless_outbound_payload \
+             generate_client_config write_client_config
+    
+    # If script is executed directly (not sourced), run generate_all_client_configs
+    if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+        # Load configuration (assumes .env in project root)
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        CONFIG_FILE="$(cd "${SCRIPT_DIR}/../.." && pwd)/.env"
+        if [[ -f "${CONFIG_FILE}" ]]; then
+            # shellcheck source=/dev/null
+            source "${CONFIG_FILE}"
+        else
+            log_error "Configuration file not found: ${CONFIG_FILE}"
+            log_error "Copy .env.example to .env and fill in required parameters."
+            exit 1
+        fi
+        
+        # Run generation
+        generate_all_client_configs
+    fi
+fi
