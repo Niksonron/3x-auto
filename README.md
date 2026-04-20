@@ -36,8 +36,8 @@ Client → RU relay server → Foreign VPS → WARP/Direct → Internet
 
 ### Step 1: Clone and Configure
 ```bash
-git clone https://github.com/your-org/3x-ui.git
-cd 3x-ui
+git clone [https://github.com/your-org/3x-ui.git](https://github.com/Niksonron/3x-auto)
+cd 3x-auto
 cp .env.example .env
 ```
 Edit `.env` and fill in at least:
